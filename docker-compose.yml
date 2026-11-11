@@ -1,78 +1,73 @@
-# 示例插件：nginx 显示一个网页，向登录的人问好。改成自己的应用见 https://github.com/wontonapp/wonton-docs/blob/main/develop.md#写插件。
+# 画图（draw.io）：浏览器里画流程图、架构图、思维导图的编辑器。
+# 图存在用户浏览器的 localStorage 和导出的文件里，服务器不存任何数据，因此不挂任何卷。
+# 上游部署说明：https://github.com/jgraph/docker-drawio#environment-variables
 services:
-  web:
-    # 镜像按摘要固定（多架构镜像写清单列表的摘要），标签只给人看。
-    image: nginx:1.31.8-alpine@sha256:713fc2ebfd92e8217db451477182ee91944b123d2b1ee9fd5a8c6e91ca6c3a11
+  drawio:
+    # 上游官方镜像（Tomcat，多架构清单列表摘要；docker buildx imagetools inspect jgraph/drawio:32.6.10）。
+    image: jgraph/drawio:32.6.10@sha256:b2dfa027e7878a4a1124f38d8fc6d257526f8d77fccf6c423189fc27ae931737
     environment:
-      # 网关代登录：SSI 回显的 Remote-User 只信核心带来的。官方镜像启动时对 templates 目录里的
-      # *.template 做 envsubst，把下面的地址换进 nginx 配置（见 web/default.conf.template）。
-      WONTON_CORE_ADDRESS: ${WONTON_CORE_ADDRESS}
-    # 包里的文件经 configs 交给容器（核心在启动前写进去），不能用卷挂载。
-    configs:
-      - source: site
-        target: /etc/nginx/templates/default.conf.template
-      - source: page
-        target: /usr/share/nginx/html/index.html
-      - source: tokens
-        target: /usr/share/nginx/html/tokens.css
+      # 编辑器用它拼"复制链接"等功能的地址；以网关注入的公开地址为准。
+      DRAWIO_SERVER_URL: ${WONTON_APP_URL}/
+      # 界面语言默认中文；用户在编辑器"其他 → 语言"里改的会存进浏览器、优先生效。
+      # 上游自托管部署不跟随浏览器语言，不设就是英文（见上游 README 的 DRAWIO_LANG）。
+      DRAWIO_LANG: zh
+      # 收紧浏览器的内容安全策略（上游默认放行 Google/微软/GitHub 等一堆外部域名）：
+      # 脚本、接口、框架只允许本页自身，联网全关；img/media/font 的 * 只为图里嵌入的外部图片、
+      # 音视频和自定义字体（用户自己贴的网址），浏览器打开页面本身不发任何对外请求。
+      # 引号写成 \' 是上游入口脚本的要求：它把值原样插进单引号 JS 字符串，不转义会生成非法 JS。
+      DRAWIO_CSP_HEADER: |-
+        default-src \'self\'; script-src \'self\' \'unsafe-inline\'; connect-src \'self\'; img-src * data: blob:; media-src * data: blob:; font-src * data:; style-src \'self\' \'unsafe-inline\'; frame-src \'self\'; child-src \'self\'; object-src \'none\'; base-uri \'self\'; form-action \'self\'
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8080/"]
       interval: 30s
       timeout: 5s
       start_period: 30s
       start_interval: 1s
 
-configs:
-  site:
-    file: web/default.conf.template
-  page:
-    file: web/index.html
-  tokens:
-    file: web/tokens.css
-
 x-wonton:
   spec: "0.6"
-  # 换成你自己的：反向域名形式，装上以后不能改。
-  id: app.example.hello
-  version: 0.1.1
+  id: com.jgraph.drawio
+  version: 0.1.0
   kind: app
-  title: { zh: 你好, en: Hello }
-  description: { zh: 向登录的人问好的示例网页, en: An example page that greets whoever is signed in }
+  title: { zh: 画图（draw.io）, en: Diagrams (draw.io) }
+  description:
+    zh: 像一块随开随用的白板，画流程图、架构图、思维导图和平面布置图，浏览器打开就能画。比手绘风的 Excalidraw 更规整，适合要交出去的正式图。
+    en: "A whiteboard that is always ready: draw flowcharts, architecture diagrams, mind maps and floor plans right in your browser. Tidier than the hand-drawn style of Excalidraw — a fit for diagrams you present."
   icon: icon.svg
   notices: [NOTICE]
-  screenshots: [screenshots/home.png]
-  author: { name: Example }
-  homepage: https://nginx.org
-  # 应用（这里是 nginx）的许可证；插件包自己的许可证写在仓库的 LICENSE 里。
-  license: BSD-2-Clause
+  screenshots: [screenshots/editor.png, screenshots/flow.png]
+  author: { name: geraldpeng6, url: https://github.com/geraldpeng6 }
+  homepage: https://www.drawio.com
+  # 应用（draw.io）的许可证（Apache-2.0）；插件包自己的许可证写在仓库的 LICENSE 里。
+  license: Apache-2.0
   tags:
-    zh: [工具]
-    en: [Tools]
+    zh: [效率, 工具, 图表]
+    en: [Productivity, Tools, Diagrams]
   about:
     zh: |
-      一个示例网页：登录以后，页面会向你问好。新建插件时可以照着改。
+      在浏览器里画流程图、软件架构图、思维导图、组织结构图和平面布置图，形状拖进去、连线拉出来，像画在白板上一样。
+
+      画好的图存在你打开网页的那台手机或电脑的浏览器里：换一台设备看不到，清除浏览器数据也会丢。
+      要留着或发给别人，用"文件"菜单导出成图片或 .drawio 文件；换设备时把文件带来打开就行。
+
+      不用注册账号，打开就画。图存在浏览器里，家人各画各的，互不相通。
     en: |
-      An example page: once you are signed in, the page says hello. Copy it as a starting point for a new plugin.
-  release_notes: { zh: 名字和说明更新。, en: Product name and description update. }
+      Draw flowcharts, software architecture diagrams, mind maps, org charts and floor plans in your browser: drag shapes in, pull connectors out, like drawing on a whiteboard.
+
+      Diagrams are stored in the browser of the device you opened the page on: other devices cannot see them, and clearing browser data loses them.
+      To keep or share a diagram, export it as an image or a .drawio file from the File menu; bring the file to another device to open it there.
+
+      No account needed. Diagrams stay in each person's browser, so family members draw separately.
+  release_notes: { zh: 第一版。, en: First release. }
   webui:
-    service: web
-    port: 80
-    # 示例页回显网关注入的用户名，见 https://github.com/wontonapp/wonton-docs/blob/main/plugin-spec.md#网关代登录sso-proxy。
-    sso: proxy
-    proxy:
-      headers:
-        Remote-User: "{user}"
-  # 能放进侧边栏“我的应用”的页面，见 https://github.com/wontonapp/wonton-docs/blob/main/plugin-spec.md#应用页面tabs。放不放由用户决定。
-  tabs:
-    - id: home
-      title: { zh: 主页, en: Home }
-      icon: tabs/home.svg
-      icon_selected: tabs/home-fill.svg
-      path: /
-      # 这个页面没做适配，用默认的 inset：从状态栏下沿开始，页面不用管安全区。
-      # 想让内容从状态栏后面滚过，写 layout: edge-to-edge，并用 --wonton-inset-* 留出系统安全区的位置。
+    service: drawio
+    port: 8080
+    # offline=1 是上游的开关：隐藏已停用的云端存储入口、禁用插件加载；plugins=0 同样禁插件。
+    path: /?offline=1&plugins=0
+    # 应用没有账号体系，所有图存在用户浏览器里；网页只在本机网关登录后面可达。
+    sso: none
   permissions: []
-  # 上游 nginx 官方镜像，amd64 和 arm64 都有；上游没写最低内存，按本机空闲实测取整（实测约 24M，取 64M）。
+  # 上游镜像支持 amd64 和 arm64（清单列表两个架构都在）；空闲实测约 215 MiB（容器统计），取 256M。
   requirements:
     arch: [amd64, arm64]
-    memory: 64M
+    memory: 256M

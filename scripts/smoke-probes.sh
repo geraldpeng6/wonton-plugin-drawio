@@ -1,61 +1,60 @@
 # shellcheck shell=bash
-# scripts/smoke.sh 的一项一项探测，跟着插件走。没写的项会 FAIL 并给出写法，不会默认放行。
+# draw.io 的冒烟探测：网页是编辑器本身，且页面与配置都不引用站外地址。
 #
-# 变量别叫 state：shellcheck 把这份文件连着 probes.sh 一起分析，probes.sh 自己也读一个 dev.sh 提供的 state；
-# 子壳体函数（fn() ( … )）里给 state 赋值，SC2031 就报在 probes.sh 上，CI 红。
-#
-# 变量：SMOKE_WEB_URL 是应用的网页入口（套件已去尾斜杠，但可能带路径，比如 SSO 登录页）；
-#       拼 API 路径用 SMOKE_WEB_ORIGIN（只有 scheme://host:port，入口的路径不掺进来），别直接接在 SMOKE_WEB_URL 后面。
-#
-# 页面：web_assert 从标准输入读页面，命中的确是应用的真实页面时返回 0。
-# 身份：identity_check 只证明身份：用应用自己的“当前用户”接口断言认出的是用户管理员，不碰应用里的数据。
-#       数据断言（是否配置过、有几条、内容对不对）全部交给 data_write / data_check：冒烟第 1 项会先装升级
-#       起点写数据，身份探针再断言“数据目录是空的”就会红。接口回字段时也只看类型（如 configured 是布尔、
-#       nodes 是数字），值和条数留给 data_check。
-#       没有用户体系时写 IDENTITY_NA=1，并在 SMOKE_NOTE 里写原因。dweb / web_get 是带用户会话的请求助手，可继续走应用自己的登录链。
-#       SSO 登录跳转不用自己写表单逻辑：dweb --sso 会从清单 webui.path 的入口出发（没写就是 /），提交核心
-#       登录页的 JS 自动表单并跟完重定向，返回的页面已带应用的登录态。
-# 工具：MCP_TOOL 写一个只读工具名（可带插件前缀），MCP_ARGS 是 JSON 参数；mcp_assert 从标准输入读调用结果。
-#       要断言多个工具时改成写 mcp_check；调用前要备数据时写 before_mcp。
-# 通知房间：申请了 notify 的插件把通知交给核心，核心以核心账号发进和主人的“Wonton”私聊。
-#       探针以主人身份读这个房间：probes_owner_room_wait <超时秒> <要找的文字> 等到开始之后发来的、包含这段文字的
-#       消息就返回 0，超时列出看到的最新消息并返回非 0。要先把等待挂到后台再发通知，否则消息可能在等待开始前就到：
-#         room_wait() {
-#           local marker="probe-$RANDOM" url
-#           url="$(docker exec "wonton-$SMOKE_INSTANCE--${SMOKE_PLUGIN_ID//./-}--web" printenv WONTON_NOTIFY_URL)"
-#           probes_owner_room_wait 120 "$marker" & local pid=$!
-#           docker exec "wonton-$SMOKE_INSTANCE--${SMOKE_PLUGIN_ID//./-}--web" wget -q -O /dev/null \
-#             --header 'Content-Type: application/json' --post-data "{\"title\":\"$marker\"}" "$url"
-#           wait "$pid"
-#         }
-#       上面的 web 换成插件里能发 HTTP 的服务；wget 换成那个服务里有的客户端。
-# 数据：合并前要验证“升级/重装不丢用户数据”时写 data_write 和 data_check（两个都写才跑）：data_write 用随机标记写
-#       一条数据并把标记原样存进 $SMOKE_STATE，data_check 读回标记去应用里找，对不上就打印看到了什么并返回非 0。
-#       应用不存用户数据时写 DATA_NA=1（两项记 N/A）。
-# 装之前要准备（如先配出口代理）：写 before_install。
-
-web_assert() { grep -q '你好'; }   # 示例页的标题
-
-identity_check() { # 页面回显的就是网关注入的用户名；示例页不存数据，也不拿数据判断身份
-  local page
-  page="$(dweb /)" || { echo "页面失败：$page"; return 1; }
-  grep -qF "你好，$SMOKE_OWNER" <<<"$page" || { echo "页面没回显用户 $SMOKE_OWNER：$(head -c 120 <<<"$page")"; return 1; }
-}
-
-# 数据：合并前要验证“升级/重装不丢用户数据”时写 data_write 和 data_check（两个都写才跑）：
-#   data_write 用随机标记写一条数据，把标记原样覆盖写进 $SMOKE_STATE（一个已建好的空文件，不是目录）；data_check 读回标记、去应用里找，
-#   找不到就打印看到了什么并返回非 0。
-# 应用不存用户数据时写 DATA_NA=1（两项记 N/A）。模板的示例页不存数据，所以这里是不适用。
-# 数据要写进插件容器时（Agent 插件的工作区标记等），容器名别自己拼：钩子契约里没有 SMOKE_SLUG，e2e 套件的
-# data_write 又跑在实例名导出之前，拼出来的名字缺段（No such container）；Bot 服务（清单声明了 bots）每个 Bot
-# 一组容器，名字还带 --<Bot 名> 后缀。按核心打的标签找，插件自带 smoke 和 e2e 套件两个运行环境都成立
-# （实例名没导出时按 SMOKE_BASE 的主机名第一段推）：
-#   _container() { # <插件 id> <服务名>：本实例里这个服务的容器
-#     local inst="${SMOKE_INSTANCE:-}" args=(--filter "label=wonton.plugin=$1" --filter "label=wonton.service=$2")
-#     if [[ -z "$inst" && -n "${SMOKE_BASE:-}" ]]; then
-#       inst="${SMOKE_BASE#http://}"; inst="${inst%%.*}"
-#     fi
-#     [[ -z "$inst" ]] || args+=(--filter "label=wonton.instance=${inst//-/}")
-#     docker ps --format '{{.Names}}' "${args[@]}" | head -1
-#   }
+# 应用没有账号体系（sso: none，网页只在本机网关登录后面可达），身份项不适用；
+# 图存在用户浏览器的 localStorage、导出的文件里，服务器不存任何数据，数据项不适用。
+export IDENTITY_NA=1
 export DATA_NA=1
+export SMOKE_NOTE="应用没有账号体系，网页只在本机网关登录后面可达；图存在用户浏览器的 localStorage 和导出的文件里，服务器不存数据"
+
+web_assert() {
+  local page pre post refs ext line
+  page="$(cat)"
+
+  # 页面是 draw.io 编辑器本身
+  grep -q 'class="geEditor' <<<"$page" || { echo "页面没有 geEditor（不是 draw.io 编辑器）"; return 1; }
+  grep -q 'js/bootstrap.js' <<<"$page" || { echo "页面没有 bootstrap.js"; return 1; }
+
+  # 浏览器会去取的资源必须都指向本站：<script src>、<link href>、<img src>。
+  # <link rel="canonical"> 和 itemprop 的图片 meta 是纯元数据，浏览器不取，不算引用（README 有说明）。
+  refs="$(
+    {
+      grep -oE '<script[^>]+src="[^"]*"' <<<"$page" | sed -E 's/.*src="([^"]*)"/\1/'
+      grep -oE '<link[^>]+href="[^"]*"' <<<"$page" | grep -v 'rel="canonical"' | sed -E 's/.*href="([^"]*)"/\1/'
+      grep -oE '<img[^>]+src="[^"]*"' <<<"$page" | sed -E 's/.*src="([^"]*)"/\1/'
+    } | grep -E '^https?://' | grep -v "^$SMOKE_WEB_ORIGIN" || true
+  )"
+  [[ -z "$refs" ]] || { echo "页面引用了站外资源：$refs"; return 1; }
+
+  # 入口脚本按环境变量生成的配置：CSP 收紧到本站（出现任何 https:// 都说明放行了站外源），
+  # 云端集成、实时协作、导出服务、图标搜索、日志上报全部关闭。
+  pre="$(dweb /js/PreConfig.js)" || pre="$(dweb /js/PreConfig.js)" || { echo "取 PreConfig.js 失败"; return 1; }
+  post="$(dweb /js/PostConfig.js)" || post="$(dweb /js/PostConfig.js)" || { echo "取 PostConfig.js 失败"; return 1; }
+  line="$(grep -F "s.setAttribute('content'" <<<"$pre")"
+  [[ -n "$line" ]] || { echo "PreConfig.js 没有注入 CSP"; return 1; }
+  if grep -qE 'https?://' <<<"$line"; then echo "CSP 放行了站外源：$line"; return 1; fi
+  for pat in \
+    "window.EXPORT_URL = null" \
+    "urlParams['sync'] = 'manual'" \
+    "urlParams['db'] = '0'" \
+    "urlParams['gh'] = '0'" \
+    "urlParams['tr'] = '0'" \
+    "urlParams['gapi'] = '0'" \
+    "urlParams['od'] = '0'" \
+    "urlParams['gl'] = '0'"; do
+    grep -qF "$pat" <<<"$pre" || { echo "PreConfig.js 缺少 $pat（集成没关掉）"; return 1; }
+  done
+  for pat in "window.ICONSEARCH_PATH = null" "window.ICON_SERVICE_PATH = null" "EditorUi.enableLogging = false"; do
+    grep -qF "$pat" <<<"$post" || { echo "PostConfig.js 缺少 $pat"; return 1; }
+  done
+
+  # 生成的配置和 PWA manifest（浏览器打开页面就会取）不引用站外地址；
+  # DRAWIO_SERVER_URL 是本站公开地址，允许。
+  ext="$(
+    {
+      grep -oE 'https?://[^"'\'' ]+' <<<"$pre$post"
+      dweb /images/manifest.json | grep -oE 'https?://[^"'\'' ]+'
+    } | grep -v "^$SMOKE_WEB_ORIGIN" | sort -u || true
+  )"
+  [[ -z "$ext" ]] || { echo "配置或 manifest 引用了站外地址：$ext"; return 1; }
+}
